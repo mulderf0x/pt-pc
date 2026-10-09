@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build pt.exe and package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python (for tools/package.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Vulkan SDK (glslc, headers)
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.357.0
+          cache: true
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Add LLVM (clang-cl) to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+
+      # Speeds up later runs: FetchContent sources/builds (SDL3, zlib, volk, VMA, glm, imgui, stb, lua51, whisper.cpp),
+      # the downloaded upscaler/OpenXR SDK files and the voice models all skip re-downloading/rebuilding when the hash
+      # of the file that pins their versions is unchanged (cmake/Dependencies.cmake checks file hashes before fetching).
+      - name: Cache CMake dependencies and downloaded SDKs/models
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/release/_deps
+            build/release/voice
+          key: cmake-deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/Upscalers.cmake', 'cmake/OpenXR.cmake', 'cmake/EnhancedTextures.cmake') }}
+          restore-keys: |
+            cmake-deps-${{ runner.os }}-
+
+      - name: Configure (CMake + Ninja, clang-cl)
+        run: cmake --preset release
+
+      - name: Build pt
+        run: cmake --build build/release --target pt --parallel
+
+      - name: Package portable zip
+        run: python tools/package.py --build build/release --out dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pt-port-windows
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
